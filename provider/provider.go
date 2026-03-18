@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -621,10 +622,21 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 	
 	// Use IP if available, otherwise fall back to hostname
 	if len(service.IPs) > 0 {
-		// Create a list of server URLs from all IPs
+		client := &http.Client{
+			Timeout: 1 * time.Second,
+		}
+
 		for _, ip := range service.IPs {
-			if ip.Address != "" {
-				return fmt.Sprintf("%s://%s:%s", protocol, ip.Address, port)
+			if ip.Address == "" {
+				continue
+			}
+
+			url := fmt.Sprintf("%s://%s:%s", protocol, ip.Address, port)
+
+			resp, err := client.Get(url)
+			if err == nil {
+				resp.Body.Close()
+				return url
 			}
 		}
 	}
