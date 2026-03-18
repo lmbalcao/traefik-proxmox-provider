@@ -8,7 +8,7 @@
 #
 # Author: NX211
 # Version: 1.0.0
-# Repository: https://github.com/NX211/traefik-proxmox-provider
+# Repository: https://github.com/lmbalcao/traefik-proxmox-provider
 
 set -o errexit   # abort on nonzero exitstatus
 set -o nounset   # abort on unbound variable
@@ -400,7 +400,7 @@ function create_tagger_script {
 # Author: NX211
 # License: MIT
 # Version: 1.0.0
-# Repository: https://github.com/NX211/traefik-proxmox-provider
+# Repository: https://github.com/lmbalcao/traefik-proxmox-provider
 
 set -o errexit
 set -o nounset

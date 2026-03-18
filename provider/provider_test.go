@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/NX211/traefik-proxmox-provider/internal"
+	"github.com/lmbalcao/traefik-proxmox-provider/internal"
 )
 
 func TestProviderConfig(t *testing.T) {
