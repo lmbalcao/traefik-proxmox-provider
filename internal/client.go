@@ -224,11 +224,14 @@ func (c *ProxmoxClient) GetContainerNetworkInterfaces(ctx context.Context, nodeN
 		return nil, err
 	}
 
+
 	result := &ParsedAgentInterfaces{
-		Result: make([]struct {
-			IPAddresses []IP `json:"ip-addresses"`
-		}, 0),
+	        Data: make([]struct {
+	                Name        string `json:"name"`
+	                IPAddresses []IP   `json:"ip-addresses"`
+	        }, 0),
 	}
+
 
 	for _, iface := range response.Data {
 		var ips []IP
@@ -248,12 +251,17 @@ func (c *ProxmoxClient) GetContainerNetworkInterfaces(ctx context.Context, nodeN
 			})
 		}
 
-		result.Result = append(result.Result, struct {
-			IPAddresses []IP `json:"ip-addresses"`
-		}{
-			IPAddresses: ips,
-		})
+
+	        result.Data = append(result.Data, struct {
+	                Name        string `json:"name"`
+	                IPAddresses []IP   `json:"ip-addresses"`
+	        }{
+	                Name:        iface.Name,
+	                IPAddresses: ips,
+	        })
+	        }
+
+	        return result, nil
 	}
 
-	return result, nil
-}
+

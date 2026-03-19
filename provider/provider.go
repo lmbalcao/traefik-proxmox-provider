@@ -28,6 +28,7 @@ type Config struct {
 	ApiToken       string `json:"apiToken" yaml:"apiToken" toml:"apiToken"`
 	ApiLogging     string `json:"apiLogging" yaml:"apiLogging" toml:"apiLogging"`
 	ApiValidateSSL string `json:"apiValidateSSL" yaml:"apiValidateSSL" toml:"apiValidateSSL"`
+	LabelPrefix    string `json:"labelPrefix" yaml:"labelPrefix" toml:"labelPrefix"`
 }
 
 // CreateConfig creates the default plugin configuration.
@@ -36,7 +37,8 @@ func CreateConfig() *Config {
 		PollInterval:   "30s", // Default to 30 seconds for polling
 		ApiValidateSSL: "true",
 		ApiLogging:     "info",
-	}
+		LabelPrefix:    "traefik.",	
+		}
 }
 
 // Provider a plugin.
@@ -45,6 +47,7 @@ type Provider struct {
 	pollInterval time.Duration
 	client       *internal.ProxmoxClient
 	cancel       func()
+	labelPrefix string
 }
 
 // New creates a new Provider plugin.
@@ -83,6 +86,7 @@ func New(ctx context.Context, config *Config, name string) (*Provider, error) {
 		name:         name,
 		pollInterval: pi,
 		client:       client,
+		labelPrefix:  config.LabelPrefix,
 	}, nil
 }
 
@@ -131,7 +135,7 @@ func (p *Provider) loadConfiguration(ctx context.Context, cfgChan chan<- json.Ma
 }
 
 func (p *Provider) updateConfiguration(ctx context.Context, cfgChan chan<- json.Marshaler) error {
-	servicesMap, err := getServiceMap(p.client, ctx)
+	servicesMap, err := getServiceMap(p.client, ctx, p.labelPrefix)
 	if err != nil {
 		return fmt.Errorf("error getting service map: %w", err)
 	}
@@ -184,7 +188,7 @@ func logVersion(client *internal.ProxmoxClient, ctx context.Context) error {
 	return nil
 }
 
-func getServiceMap(client *internal.ProxmoxClient, ctx context.Context) (map[string][]internal.Service, error) {
+func getServiceMap(client *internal.ProxmoxClient, ctx context.Context, labelPrefix string) (map[string][]internal.Service, error) {
 	servicesMap := make(map[string][]internal.Service)
 
 	nodes, err := client.GetNodes(ctx)
@@ -193,7 +197,7 @@ func getServiceMap(client *internal.ProxmoxClient, ctx context.Context) (map[str
 	}
 
 	for _, nodeStatus := range nodes {
-		services, err := scanServices(client, ctx, nodeStatus.Node)
+		services, err := scanServices(client, ctx, nodeStatus.Node, labelPrefix)
 		if err != nil {
 			log.Printf("Error scanning services on node %s: %v", nodeStatus.Node, err)
 			continue
@@ -235,7 +239,7 @@ func getIPsOfService(client *internal.ProxmoxClient, ctx context.Context, nodeNa
 	return filteredIPs, nil
 }
 
-func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName string) (services []internal.Service, err error) {
+func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName string, labelPrefix string) (services []internal.Service, err error) {
 	// Scan virtual machines
 	vms, err := client.GetVirtualMachines(ctx, nodeName)
 	if err != nil {
@@ -254,7 +258,7 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName 
 				continue
 			}
 			
-			traefikConfig := config.GetTraefikMap()
+			traefikConfig := config.GetTraefikMap(labelPrefix)
 			if client.LogLevel == "debug" {
 				log.Printf("VM %s (%d) traefik config: %v", vm.Name, vm.VMID, traefikConfig)
 			}
@@ -289,7 +293,7 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName 
 				continue
 			}
 
-			traefikConfig := config.GetTraefikMap()
+			traefikConfig := config.GetTraefikMap(labelPrefix)
 			if client.LogLevel == "debug" {
 				log.Printf("DEBUG: Container %s (%d) traefik config: %v", ct.Name, ct.VMID, traefikConfig)
 			}
@@ -620,27 +624,15 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 		return fmt.Sprintf("%s://%s:%s", protocol, val, port)
 	}
 	
-	// Use IP if available, otherwise fall back to hostname
-	if len(service.IPs) > 0 {
-		client := &http.Client{
-			Timeout: 1 * time.Second,
-		}
+        // Use first available IP if present, otherwise fall back to hostname
+        if len(service.IPs) > 0 {
+                for _, ip := range service.IPs {
+                        if ip.Address != "" {
+                                return fmt.Sprintf("%s://%s:%s", protocol, ip.Address, port)
+                        }
+                }
+        }
 
-		for _, ip := range service.IPs {
-			if ip.Address == "" {
-				continue
-			}
-
-			url := fmt.Sprintf("%s://%s:%s", protocol, ip.Address, port)
-
-			resp, err := client.Get(url)
-			if err == nil {
-				resp.Body.Close()
-				return url
-			}
-		}
-	}
-	
 	// Fall back to hostname
 	url := fmt.Sprintf("%s://%s.%s:%s", protocol, service.Name, nodeName, port)
 	log.Printf("No IPs found, using hostname URL %s for service %s (ID: %d)", url, service.Name, service.ID)

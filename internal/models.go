@@ -2,6 +2,7 @@ package internal
 
 import (
 	"strings"
+	"log"
 )
 
 type ParsedConfig struct {
@@ -9,9 +10,10 @@ type ParsedConfig struct {
 }
 
 type ParsedAgentInterfaces struct {
-	Result []struct {
-		IPAddresses []IP `json:"ip-addresses"`
-	} `json:"result"`
+     Data []struct {
+	     Name        string `json:"name"`
+             IPAddresses []IP `json:"ip-addresses"`
+     } `json:"data"`
 }
 
 type NodeStatus struct {
@@ -51,35 +53,60 @@ func NewService(id uint64, name string, config map[string]string) Service {
 	return Service{ID: id, Name: name, Config: config, IPs: make([]IP, 0)}
 }
 
-func (pc *ParsedConfig) GetTraefikMap() map[string]string {
-	const separator = "="
+func (pc *ParsedConfig) GetTraefikMap(labelPrefix string) map[string]string {
+        const separator = "="
 
-	// Normalize space-separated traefik labels (e.g. from OCI containers)
-	// into newline-separated labels so they are parsed individually.
-	normalized := strings.ReplaceAll(pc.Description, " traefik.", "\ntraefik.")
+        prefix := strings.ToLower(strings.TrimSpace(labelPrefix))
+        if prefix == "" {
+                prefix = "traefik."
+        }
 
-	m := make(map[string]string)
-	lines := strings.Split(normalized, "\n")
-	for _, line := range lines {
-		key, value, found := strings.Cut(line, separator)
-		if !found {
-			continue
-		}
+        // Mantém a lógica antiga:
+        // converte labels separadas por espaço em labels separadas por newline,
+        // mas usando o prefixo configurado.
+        normalized := strings.ReplaceAll(pc.Description, " "+prefix, "\n"+prefix)
 
-		key = strings.Trim(key, "\" ")
-		value = strings.Trim(value, "\" ")
+        m := make(map[string]string)
+        lines := strings.Split(normalized, "\n")
+        for _, line := range lines {
+                key, value, found := strings.Cut(line, separator)
+                if !found {
+                        continue
+                }
 
-		if strings.HasPrefix(strings.ToLower(key), "traefik.") {
-			m[strings.ToLower(key)] = value
-		}
-	}
-	return m
+                key = strings.Trim(key, "\" ")
+                value = strings.Trim(value, "\" ")
+
+                lowerKey := strings.ToLower(key)
+                if strings.HasPrefix(lowerKey, prefix) {
+                        suffix := strings.TrimPrefix(lowerKey, prefix)
+                        normalizedKey := "traefik." + suffix
+                        m[normalizedKey] = value
+                }
+        }
+
+        return m
 }
 
 func (pai *ParsedAgentInterfaces) GetIPs() []IP {
-	ips := make([]IP, 0)
-	for _, r := range pai.Result {
-		ips = append(ips, r.IPAddresses...)
-	}
-	return ips
+        primary := make([]IP, 0)
+        secondary := make([]IP, 0)
+
+        for _, r := range pai.Data {
+                log.Printf("DEBUG iface=%s ips=%+v", r.Name, r.IPAddresses)
+
+                isPrimary := r.Name == "eth0" || r.Name == "ens18"
+
+                for _, ip := range r.IPAddresses {
+                        if isPrimary {
+                                primary = append(primary, ip)
+                        } else {
+                                secondary = append(secondary, ip)
+                        }
+                }
+        }
+
+        log.Printf("DEBUG primary=%+v secondary=%+v", primary, secondary)
+
+        return append(primary, secondary...)
 }
