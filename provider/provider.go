@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -50,13 +49,6 @@ type Provider struct {
 	cancel       func()
 	labelPrefix  string
 }
-
-type ipCandidate struct {
-	Address  string
-	Priority int
-}
-
-var httpReachabilityProbe = defaultHTTPReachabilityProbe
 
 // New creates a new Provider plugin.
 func New(ctx context.Context, config *Config, name string) (*Provider, error) {
@@ -628,143 +620,64 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 	// Look for service-specific ip
 	ipLabel := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.ip", serviceName)
 	if val, exists := service.Config[ipLabel]; exists {
-		log.Printf("Using explicit service IP %s for service %s with priority 0", val, service.Name)
+		log.Printf("Using explicit service IP %s for service %s", val, service.Name)
 		return fmt.Sprintf("%s://%s:%s", protocol, val, port)
 	}
 
 	// Use IP if available, otherwise fall back to hostname
 	if len(service.IPs) > 0 {
-		candidates := buildIPCandidates(service.IPs, getPreferredCIDRs(service))
-
-		for _, candidate := range candidates {
-			url := fmt.Sprintf("%s://%s:%s", protocol, candidate.Address, port)
-			if httpReachabilityProbe(url) {
-				log.Printf("Selected service IP %s for service %s with priority %d", candidate.Address, service.Name, candidate.Priority)
-				return url
-			}
+		if address := selectServiceIP(service.IPs); address != "" {
+			url := fmt.Sprintf("%s://%s:%s", protocol, address, port)
+			log.Printf("Selected service IP %s for service %s", address, service.Name)
+			return url
 		}
 	}
 
 	// Fall back to hostname
 	url := fmt.Sprintf("%s://%s.%s:%s", protocol, service.Name, nodeName, port)
-	log.Printf("No reachable IP found, using hostname URL %s for service %s (ID: %d)", url, service.Name, service.ID)
+	log.Printf("No valid IP found, using hostname URL %s for service %s (ID: %d)", url, service.Name, service.ID)
 	return url
 }
 
-func buildIPCandidates(ips []internal.IP, preferredCIDRs []*net.IPNet) []ipCandidate {
-	candidates := make([]ipCandidate, 0, len(ips))
+func selectServiceIP(ips []internal.IP) string {
+	var fallback string
+
 	for _, ip := range ips {
-		priority, ok := classifyIPPriority(ip.Address, preferredCIDRs)
-		if !ok {
+		address := strings.TrimSpace(ip.Address)
+		if !isUsableIP(address) {
 			continue
 		}
 
-		candidates = append(candidates, ipCandidate{
-			Address:  ip.Address,
-			Priority: priority,
-		})
-	}
-
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].Priority < candidates[j].Priority
-	})
-
-	return candidates
-}
-
-func classifyIPPriority(address string, preferredCIDRs []*net.IPNet) (int, bool) {
-	ip, ok := parseUsableIP(address)
-	if !ok {
-		return 0, false
-	}
-
-	for index, cidr := range preferredCIDRs {
-		if cidr.Contains(ip) {
-			return 10 + index, true
+		switch {
+		case strings.HasPrefix(address, "192.168."):
+			return address
+		case strings.HasPrefix(address, "10.10."):
+			if fallback == "" {
+				fallback = address
+			}
+		case fallback == "":
+			fallback = address
 		}
 	}
 
-	if isPrivateRFC1918(ip) {
-		return 20, true
-	}
-
-	return 30, true
+	return fallback
 }
 
-func parseUsableIP(address string) (net.IP, bool) {
+func isUsableIP(address string) bool {
 	if strings.TrimSpace(address) == "" {
-		return nil, false
+		return false
 	}
 
 	ip := net.ParseIP(address)
 	if ip == nil {
-		return nil, false
+		return false
 	}
 
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return nil, false
-	}
-
-	return ip, true
-}
-
-func getPreferredCIDRs(service internal.Service) []*net.IPNet {
-	defaultCIDRs := []string{
-		"192.168.0.0/16",
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-	}
-
-	cidrs := make([]*net.IPNet, 0, len(defaultCIDRs))
-	for _, value := range defaultCIDRs {
-		_, network, err := net.ParseCIDR(value)
-		if err != nil {
-			log.Printf("Skipping invalid preferred CIDR %q for service %s: %v", value, service.Name, err)
-			continue
-		}
-		cidrs = append(cidrs, network)
-	}
-
-	return cidrs
-}
-
-func isPrivateRFC1918(ip net.IP) bool {
-	ipv4 := ip.To4()
-	if ipv4 == nil {
 		return false
 	}
 
-	privateCIDRs := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-	}
-
-	for _, value := range privateCIDRs {
-		_, network, err := net.ParseCIDR(value)
-		if err != nil {
-			continue
-		}
-		if network.Contains(ipv4) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func defaultHTTPReachabilityProbe(url string) bool {
-	client := &http.Client{
-		Timeout: 1 * time.Second,
-	}
-
-	resp, err := client.Get(url)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest
+	return true
 }
 
 // Helper to get router rule
