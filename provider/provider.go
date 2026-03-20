@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"regexp"
 	"sort"
@@ -37,8 +38,8 @@ func CreateConfig() *Config {
 		PollInterval:   "30s", // Default to 30 seconds for polling
 		ApiValidateSSL: "true",
 		ApiLogging:     "info",
-		LabelPrefix:    "traefik.",	
-		}
+		LabelPrefix:    "traefik.",
+	}
 }
 
 // Provider a plugin.
@@ -47,8 +48,15 @@ type Provider struct {
 	pollInterval time.Duration
 	client       *internal.ProxmoxClient
 	cancel       func()
-	labelPrefix string
+	labelPrefix  string
 }
+
+type ipCandidate struct {
+	Address  string
+	Priority int
+}
+
+var httpReachabilityProbe = defaultHTTPReachabilityProbe
 
 // New creates a new Provider plugin.
 func New(ctx context.Context, config *Config, name string) (*Provider, error) {
@@ -250,21 +258,21 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName 
 		if client.LogLevel == "debug" {
 			log.Printf("DEBUG: Scanning VM %s/%s (%d): %s", nodeName, vm.Name, vm.VMID, vm.Status)
 		}
-		
+
 		if vm.Status == "running" {
 			config, err := client.GetVMConfig(ctx, nodeName, vm.VMID)
 			if err != nil {
 				log.Printf("ERROR: Error getting VM config for %d: %v", vm.VMID, err)
 				continue
 			}
-			
+
 			traefikConfig := config.GetTraefikMap(labelPrefix)
 			if client.LogLevel == "debug" {
 				log.Printf("VM %s (%d) traefik config: %v", vm.Name, vm.VMID, traefikConfig)
 			}
-			
+
 			service := internal.NewService(vm.VMID, vm.Name, traefikConfig)
-			
+
 			ips, err := getIPsOfService(client, ctx, nodeName, vm.VMID, false)
 			if err == nil {
 				service.IPs = ips
@@ -284,7 +292,6 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName 
 		if client.LogLevel == "debug" {
 			log.Printf("DEBUG: Scanning container %s/%s (%d): %s", nodeName, ct.Name, ct.VMID, ct.Status)
 		}
-			
 
 		if ct.Status == "running" {
 			config, err := client.GetContainerConfig(ctx, nodeName, ct.VMID)
@@ -344,11 +351,11 @@ func generateConfiguration(servicesMap map[string][]internal.Service) *dynamic.C
 				log.Printf("Skipping service %s (ID: %d) because traefik.enable is not true", service.Name, service.ID)
 				continue
 			}
-			
+
 			// Extract router and service names from labels
 			routerPrefixMap := make(map[string]bool)
 			servicePrefixMap := make(map[string]bool)
-			
+
 			for k := range service.Config {
 				if strings.HasPrefix(k, "traefik.http.routers.") {
 					parts := strings.Split(k, ".")
@@ -363,14 +370,14 @@ func generateConfiguration(servicesMap map[string][]internal.Service) *dynamic.C
 					}
 				}
 			}
-			
+
 			// Default to service ID if no names found
 			defaultID := fmt.Sprintf("%s-%d", service.Name, service.ID)
-			
+
 			// Convert maps to slices
 			routerNames := mapKeysToSlice(routerPrefixMap)
 			serviceNames := mapKeysToSlice(servicePrefixMap)
-			
+
 			// Use defaults if no names found
 			if len(routerNames) == 0 {
 				routerNames = []string{defaultID}
@@ -378,7 +385,7 @@ func generateConfiguration(servicesMap map[string][]internal.Service) *dynamic.C
 			if len(serviceNames) == 0 {
 				serviceNames = []string{defaultID}
 			}
-			
+
 			// Create services
 			for _, serviceName := range serviceNames {
 				// Configure load balancer options
@@ -386,57 +393,57 @@ func generateConfiguration(servicesMap map[string][]internal.Service) *dynamic.C
 					PassHostHeader: boolPtr(true), // Default is true
 					Servers:        []dynamic.Server{},
 				}
-				
+
 				// Apply service options
 				applyServiceOptions(loadBalancer, service, serviceName)
-				
+
 				// Add server URL(s)
 				serverURL := getServiceURL(service, serviceName, nodeName)
 				loadBalancer.Servers = append(loadBalancer.Servers, dynamic.Server{
 					URL: serverURL,
 				})
-				
+
 				config.HTTP.Services[serviceName] = &dynamic.Service{
 					LoadBalancer: loadBalancer,
 				}
 			}
-			
+
 			// Create routers
 			for _, routerName := range routerNames {
 				// Get router rule
 				rule := getRouterRule(service, routerName)
-				
+
 				// Find target service (prefer explicit mapping)
 				targetService := serviceNames[0]
 				serviceLabel := fmt.Sprintf("traefik.http.routers.%s.service", routerName)
 				if val, exists := service.Config[serviceLabel]; exists {
 					targetService = val
 				}
-				
+
 				// Create basic router
 				router := &dynamic.Router{
 					Service:  targetService,
 					Rule:     rule,
 					Priority: 1, // Default priority
 				}
-				
+
 				// Apply additional router options from labels
 				applyRouterOptions(router, service, routerName)
-				
+
 				config.HTTP.Routers[routerName] = router
 			}
-			
+
 			log.Printf("Created router and service for %s (ID: %d)", service.Name, service.ID)
 		}
 	}
-	
+
 	return config
 }
 
 // Apply router configuration options from labels
 func applyRouterOptions(router *dynamic.Router, service internal.Service, routerName string) {
 	prefix := fmt.Sprintf("traefik.http.routers.%s", routerName)
-	
+
 	// Handle EntryPoints
 	if entrypoints, exists := service.Config[prefix+".entrypoints"]; exists {
 		// Backward compatibility with singular form
@@ -444,19 +451,19 @@ func applyRouterOptions(router *dynamic.Router, service internal.Service, router
 	} else if entrypoint, exists := service.Config[prefix+".entrypoint"]; exists {
 		router.EntryPoints = []string{entrypoint}
 	}
-	
+
 	// Handle Middlewares
 	if middlewares, exists := service.Config[prefix+".middlewares"]; exists {
 		router.Middlewares = strings.Split(middlewares, ",")
 	}
-	
+
 	// Handle Priority
 	if priority, exists := service.Config[prefix+".priority"]; exists {
 		if p, err := stringToInt(priority); err == nil {
 			router.Priority = p
 		}
 	}
-	
+
 	// Handle TLS
 	tls := handleRouterTLS(service, prefix)
 	if tls != nil {
@@ -467,31 +474,31 @@ func applyRouterOptions(router *dynamic.Router, service internal.Service, router
 // Apply service configuration options from labels
 func applyServiceOptions(lb *dynamic.ServersLoadBalancer, service internal.Service, serviceName string) {
 	prefix := fmt.Sprintf("traefik.http.services.%s.loadbalancer", serviceName)
-	
+
 	// Handle PassHostHeader
 	if passHostHeader, exists := service.Config[prefix+".passhostheader"]; exists {
 		if val, err := stringToBool(passHostHeader); err == nil {
 			lb.PassHostHeader = &val
 		}
 	}
-	
+
 	// Handle HealthCheck
 	if healthcheckPath, exists := service.Config[prefix+".healthcheck.path"]; exists {
 		hc := &dynamic.ServerHealthCheck{
 			Path: healthcheckPath,
 		}
-		
+
 		if interval, exists := service.Config[prefix+".healthcheck.interval"]; exists {
 			hc.Interval = interval
 		}
-		
+
 		if timeout, exists := service.Config[prefix+".healthcheck.timeout"]; exists {
 			hc.Timeout = timeout
 		}
-		
+
 		lb.HealthCheck = hc
 	}
-	
+
 	// Handle Sticky Sessions
 	if cookieName, exists := service.Config[prefix+".sticky.cookie.name"]; exists {
 		sticky := &dynamic.Sticky{
@@ -499,29 +506,29 @@ func applyServiceOptions(lb *dynamic.ServersLoadBalancer, service internal.Servi
 				Name: cookieName,
 			},
 		}
-		
+
 		if secure, exists := service.Config[prefix+".sticky.cookie.secure"]; exists {
 			if val, err := stringToBool(secure); err == nil {
 				sticky.Cookie.Secure = val
 			}
 		}
-		
+
 		if httpOnly, exists := service.Config[prefix+".sticky.cookie.httponly"]; exists {
 			if val, err := stringToBool(httpOnly); err == nil {
 				sticky.Cookie.HTTPOnly = val
 			}
 		}
-		
+
 		lb.Sticky = sticky
 	}
-	
+
 	// Handle ResponseForwarding
 	if flushInterval, exists := service.Config[prefix+".responseforwarding.flushinterval"]; exists {
 		lb.ResponseForwarding = &dynamic.ResponseForwarding{
 			FlushInterval: flushInterval,
 		}
 	}
-	
+
 	// Handle ServerTransport
 	if serverTransport, exists := service.Config[prefix+".serverstransport"]; exists {
 		lb.ServersTransport = serverTransport
@@ -603,7 +610,7 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 	// Default protocol and port
 	protocol := "http"
 	port := "80"
-	
+
 	// Check for HTTPS protocol setting
 	httpsLabel := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.scheme", serviceName)
 	if scheme, exists := service.Config[httpsLabel]; exists && scheme == "https" {
@@ -611,7 +618,7 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 		// Update default port for HTTPS
 		port = "443"
 	}
-	
+
 	// Look for service-specific port
 	portLabel := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceName)
 	if val, exists := service.Config[portLabel]; exists {
@@ -621,47 +628,156 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 	// Look for service-specific ip
 	ipLabel := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.ip", serviceName)
 	if val, exists := service.Config[ipLabel]; exists {
+		log.Printf("Using explicit service IP %s for service %s with priority 0", val, service.Name)
 		return fmt.Sprintf("%s://%s:%s", protocol, val, port)
 	}
-	
+
 	// Use IP if available, otherwise fall back to hostname
 	if len(service.IPs) > 0 {
-			client := &http.Client{
-					Timeout: 1 * time.Second,
+		candidates := buildIPCandidates(service.IPs, getPreferredCIDRs(service))
+
+		for _, candidate := range candidates {
+			url := fmt.Sprintf("%s://%s:%s", protocol, candidate.Address, port)
+			if httpReachabilityProbe(url) {
+				log.Printf("Selected service IP %s for service %s with priority %d", candidate.Address, service.Name, candidate.Priority)
+				return url
 			}
-
-			for _, ip := range service.IPs {
-					if ip.Address == "" {
-							continue
-					}
-
-					url := fmt.Sprintf("%s://%s:%s", protocol, ip.Address, port)
-
-					resp, err := client.Get(url)
-					if err == nil {
-							resp.Body.Close()
-							return url
-					}
-			}
+		}
 	}
 
 	// Fall back to hostname
 	url := fmt.Sprintf("%s://%s.%s:%s", protocol, service.Name, nodeName, port)
-	log.Printf("No IPs found, using hostname URL %s for service %s (ID: %d)", url, service.Name, service.ID)
+	log.Printf("No reachable IP found, using hostname URL %s for service %s (ID: %d)", url, service.Name, service.ID)
 	return url
+}
+
+func buildIPCandidates(ips []internal.IP, preferredCIDRs []*net.IPNet) []ipCandidate {
+	candidates := make([]ipCandidate, 0, len(ips))
+	for _, ip := range ips {
+		priority, ok := classifyIPPriority(ip.Address, preferredCIDRs)
+		if !ok {
+			continue
+		}
+
+		candidates = append(candidates, ipCandidate{
+			Address:  ip.Address,
+			Priority: priority,
+		})
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].Priority < candidates[j].Priority
+	})
+
+	return candidates
+}
+
+func classifyIPPriority(address string, preferredCIDRs []*net.IPNet) (int, bool) {
+	ip, ok := parseUsableIP(address)
+	if !ok {
+		return 0, false
+	}
+
+	for index, cidr := range preferredCIDRs {
+		if cidr.Contains(ip) {
+			return 10 + index, true
+		}
+	}
+
+	if isPrivateRFC1918(ip) {
+		return 20, true
+	}
+
+	return 30, true
+}
+
+func parseUsableIP(address string) (net.IP, bool) {
+	if strings.TrimSpace(address) == "" {
+		return nil, false
+	}
+
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return nil, false
+	}
+
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return nil, false
+	}
+
+	return ip, true
+}
+
+func getPreferredCIDRs(service internal.Service) []*net.IPNet {
+	defaultCIDRs := []string{
+		"192.168.0.0/16",
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+	}
+
+	cidrs := make([]*net.IPNet, 0, len(defaultCIDRs))
+	for _, value := range defaultCIDRs {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			log.Printf("Skipping invalid preferred CIDR %q for service %s: %v", value, service.Name, err)
+			continue
+		}
+		cidrs = append(cidrs, network)
+	}
+
+	return cidrs
+}
+
+func isPrivateRFC1918(ip net.IP) bool {
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return false
+	}
+
+	privateCIDRs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+
+	for _, value := range privateCIDRs {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ipv4) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func defaultHTTPReachabilityProbe(url string) bool {
+	client := &http.Client{
+		Timeout: 1 * time.Second,
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest
 }
 
 // Helper to get router rule
 func getRouterRule(service internal.Service, routerName string) string {
 	// Default rule
 	rule := fmt.Sprintf("Host(`%s`)", service.Name)
-	
+
 	// Look for router-specific rule
 	ruleLabel := fmt.Sprintf("traefik.http.routers.%s.rule", routerName)
 	if val, exists := service.Config[ruleLabel]; exists {
 		rule = val
 	}
-	
+
 	return rule
 }
 

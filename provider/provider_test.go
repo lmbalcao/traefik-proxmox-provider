@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/lmbalcao/traefik-proxmox-provider/internal"
@@ -242,6 +243,11 @@ func TestProviderService(t *testing.T) {
 }
 
 func TestGetServiceURL(t *testing.T) {
+	originalProbe := httpReachabilityProbe
+	t.Cleanup(func() {
+		httpReachabilityProbe = originalProbe
+	})
+
 	tests := []struct {
 		name        string
 		service     internal.Service
@@ -328,13 +334,107 @@ func TestGetServiceURL(t *testing.T) {
 	}
 }
 
+func TestGetServiceURL_IPPrioritySelection(t *testing.T) {
+	originalProbe := httpReachabilityProbe
+	t.Cleanup(func() {
+		httpReachabilityProbe = originalProbe
+	})
+
+	var attempted []string
+	httpReachabilityProbe = func(url string) bool {
+		attempted = append(attempted, url)
+		return url == "http://192.168.30.10:8080"
+	}
+
+	service := internal.Service{
+		Name: "service",
+		IPs: []internal.IP{
+			{Address: "172.17.0.5"},
+			{Address: "192.168.30.10"},
+		},
+		Config: map[string]string{
+			"traefik.http.services.service.loadbalancer.server.port": "8080",
+		},
+	}
+
+	url := getServiceURL(service, "service", "node1")
+
+	if url != "http://192.168.30.10:8080" {
+		t.Fatalf("Expected URL to be http://192.168.30.10:8080, got %s", url)
+	}
+
+	expectedAttempts := []string{"http://192.168.30.10:8080"}
+	if !reflect.DeepEqual(attempted, expectedAttempts) {
+		t.Fatalf("Expected attempts %v, got %v", expectedAttempts, attempted)
+	}
+}
+
+func TestBuildIPCandidates_IgnoresInvalidAndSpecialIPs(t *testing.T) {
+	candidates := buildIPCandidates([]internal.IP{
+		{Address: ""},
+		{Address: "invalid"},
+		{Address: "127.0.0.1"},
+		{Address: "169.254.1.20"},
+		{Address: "::1"},
+		{Address: "fe80::1"},
+		{Address: "8.8.8.8"},
+	}, getPreferredCIDRs(internal.Service{Name: "service"}))
+
+	if len(candidates) != 1 {
+		t.Fatalf("Expected 1 candidate, got %d", len(candidates))
+	}
+
+	if candidates[0].Address != "8.8.8.8" {
+		t.Fatalf("Expected remaining candidate to be 8.8.8.8, got %s", candidates[0].Address)
+	}
+}
+
+func TestGetServiceURL_FallsBackToHostnameWhenNoIPResponds(t *testing.T) {
+	originalProbe := httpReachabilityProbe
+	t.Cleanup(func() {
+		httpReachabilityProbe = originalProbe
+	})
+
+	var attempted []string
+	httpReachabilityProbe = func(url string) bool {
+		attempted = append(attempted, url)
+		return false
+	}
+
+	service := internal.Service{
+		ID:   42,
+		Name: "service",
+		IPs: []internal.IP{
+			{Address: "172.16.1.10"},
+			{Address: "8.8.8.8"},
+		},
+		Config: map[string]string{
+			"traefik.http.services.service.loadbalancer.server.port": "8080",
+		},
+	}
+
+	url := getServiceURL(service, "service", "node1")
+
+	if url != "http://service.node1:8080" {
+		t.Fatalf("Expected hostname fallback, got %s", url)
+	}
+
+	expectedAttempts := []string{
+		"http://172.16.1.10:8080",
+		"http://8.8.8.8:8080",
+	}
+	if !reflect.DeepEqual(attempted, expectedAttempts) {
+		t.Fatalf("Expected attempts %v, got %v", expectedAttempts, attempted)
+	}
+}
+
 func TestHandleRouterTLS_ArrayDomains(t *testing.T) {
 	tests := []struct {
-		name           string
-		config         map[string]string
-		expectedMain   []string
-		expectedSANs   [][]string
-		expectNil      bool
+		name         string
+		config       map[string]string
+		expectedMain []string
+		expectedSANs [][]string
+		expectNil    bool
 	}{
 		{
 			name: "Array syntax with main and sans",
