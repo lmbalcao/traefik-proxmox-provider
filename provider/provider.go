@@ -624,14 +624,26 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 		return fmt.Sprintf("%s://%s:%s", protocol, val, port)
 	}
 	
-        // Use first available IP if present, otherwise fall back to hostname
-        if len(service.IPs) > 0 {
-                for _, ip := range service.IPs {
-                        if ip.Address != "" {
-                                return fmt.Sprintf("%s://%s:%s", protocol, ip.Address, port)
-                        }
-                }
-        }
+	// Use IP if available, otherwise fall back to hostname
+	if len(service.IPs) > 0 {
+			client := &http.Client{
+					Timeout: 1 * time.Second,
+			}
+
+			for _, ip := range service.IPs {
+					if ip.Address == "" {
+							continue
+					}
+
+					url := fmt.Sprintf("%s://%s:%s", protocol, ip.Address, port)
+
+					resp, err := client.Get(url)
+					if err == nil {
+							resp.Body.Close()
+							return url
+					}
+			}
+	}
 
 	// Fall back to hostname
 	url := fmt.Sprintf("%s://%s.%s:%s", protocol, service.Name, nodeName, port)
