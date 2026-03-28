@@ -2,17 +2,18 @@
 
 ![Traefik Proxmox Provider](https://raw.githubusercontent.com/nx211/traefik-proxmox-provider/main/.assets/logo.png)
 
-A Traefik provider that automatically configures routing based on Proxmox VE virtual machines and containers.
+A Traefik provider that discovers running Proxmox VE virtual machines and containers and builds dynamic HTTP routing from labels stored in the Proxmox notes/description field.
 
 ## Features
 
 - Automatically discovers Proxmox VE virtual machines and containers
 - Configures routing based on VM/container metadata
-- Supports both HTTP and HTTPS endpoints
+- Supports HTTP and HTTPS backend schemes
 - Configurable polling interval
 - SSL validation options
 - Logging configuration
-- Full support for Traefik's routing, middleware, and TLS options
+- Configurable label prefix (`traefik.` by default)
+- Support covered by tests for routers, middlewares, TLS domains, health checks, sticky cookies and backend scheme selection
 
 ## Installation
 
@@ -23,7 +24,7 @@ experimental:
   plugins:
     traefik-proxmox-provider:
       moduleName: github.com/lmbalcao/traefik-proxmox-provider
-      version: v0.7.0
+      version: <version>
 ```
 
 2. Configure the provider in your dynamic configuration:
@@ -53,6 +54,12 @@ providers:
 | `apiToken` | `string` | - | The API token secret |
 | `apiLogging` | `string` | `"info"` | Log level for API operations ("debug" or "info") |
 | `apiValidateSSL` | `string` | `"true"` | Whether to validate SSL certificates |
+| `labelPrefix` | `string` | `"traefik."` | Prefix used when extracting labels from VM/container notes |
+
+Notes:
+
+* `pollInterval` must be at least `5s`
+* labels are read from the Proxmox notes/description field
 
 ## Proxmox API Token Setup
 
@@ -188,6 +195,8 @@ traefik.http.services.myapp.loadbalancer.healthcheck.path=/health
 6. If IPs are found, they're used as server URLs; otherwise, the VM/container hostname is used
 7. This process repeats according to the configured poll interval
 
+If no valid IPv4 addresses are found, the provider falls back to the VM/container hostname.
+
 ## Examples
 
 ### Basic Configuration
@@ -257,4 +266,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
